@@ -1,7 +1,7 @@
 #include "isocket.h"
 #include <stdio.h>
 
-#define PORT 8080
+#define PORT 12346
 #define CLIENT_QUEUE_L 4
 
 int main ()

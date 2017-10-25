@@ -263,6 +263,18 @@ int launchMetadata(ParseResults_t myParseResults)
 {
 	int fd = connectToMetadataServer(myParseResults);
 	if(fd < 0) return(-1);
+	metadataPacket_t* initiator = (metadataPacket_t*) malloc(sizeof(metadataPacket_t));
+	if(initiator == NULL)
+	{
+		fprintf(stderr, "Unable to allocate memory for the initiator packet\n");
+		return(-1);
+	}
+	initiator->mode = myParseResults.protocol;
+	initiator->lostOverLastPeriod = 0;
+	initiator->receivedOverLastPeriod = 0;
+	initiator->lastIndexReceived = 0;
+	send(fd, initiator, sizeof(metadataPacket_t), 0);
+	free(initiator);
 	return(0);
 }
 

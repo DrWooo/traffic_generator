@@ -26,7 +26,8 @@
 #define MAXFILENAMESIZE 50
 #define MAXADDRESSSIZE 50
 #define DEFAULT_ADDRESS "127.0.0.1"
-#define DEFAULT_PORT 12345
+#define DEFAULT_SERVERFLOWPORT 12345
+#define DEFAULT_CLIENTFLOWPORT 12344
 #define DEFAULT_PROTOCOL USE_TCP
 #define DEFAULT_DATARATE 1000000
 #define DEFAULT_PACKETSIZE PACKETSIZE_MIN
@@ -42,7 +43,8 @@ typedef struct ParseResults{
 	char filename[MAXFILENAMESIZE];
 	int useFile;
 	int protocol;
-	int port;
+	int serverFlowPort;
+	int clientFlowPort;
 	char address[MAXADDRESSSIZE];
 	int packetSize;
 	int dataRate;
@@ -65,7 +67,8 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 	//By default : 
 	results->useFile = 0;
 	results->protocol = DEFAULT_PROTOCOL;
-	results->port = DEFAULT_PORT;
+	results->serverFlowPort = DEFAULT_SERVERFLOWPORT;
+	results->clientFlowPort = DEFAULT_CLIENTFLOWPORT;
 	results->packetSize = DEFAULT_PACKETSIZE;
 	results->dataRate = DEFAULT_DATARATE;
 	results->metadataPort = DEFAULT_METADATAPORT;
@@ -113,7 +116,7 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return (-2);
 			}
-			results->port = atoi(argv[i+1]);
+			results->serverFlowPort = atoi(argv[i+1]);
 			valid = 1;
 			//Jump to next argument as i+1 is the port number
 			i++;
@@ -219,7 +222,7 @@ void printArguments(ParseResults_t myParseResults)
 		fprintf(stdout, "Emission datarate : %dbps\n", myParseResults.dataRate);
 	}
 	fprintf(stdout, "Address : %s\n", myParseResults.address);
-	fprintf(stdout, "Port tested : %d\n", myParseResults.port);
+	fprintf(stdout, "Port tested : %d\n", myParseResults.serverFlowPort);
 	fprintf(stdout, "Metadata port : %d\n", myParseResults.metadataPort);
 	if(myParseResults.useFile)
 	{
@@ -263,19 +266,51 @@ int launchMetadata(ParseResults_t myParseResults)
 {
 	int fd = connectToMetadataServer(myParseResults);
 	if(fd < 0) return(-1);
-	metadataPacket_t* initiator = (metadataPacket_t*) malloc(sizeof(metadataPacket_t));
+	configurationPacket_t* initiator = (configurationPacket_t*) malloc(sizeof(configurationPacket_t));
 	if(initiator == NULL)
 	{
 		fprintf(stderr, "Unable to allocate memory for the initiator packet\n");
 		return(-1);
 	}
 	initiator->mode = myParseResults.protocol;
-	initiator->lostOverLastPeriod = 0;
-	initiator->receivedOverLastPeriod = 0;
-	initiator->lastIndexReceived = 0;
+	initiator->serverFlowPort = DEFAULT_SERVERFLOWPORT;
+	initiator->clientFlowPort = DEFAULT_CLIENTFLOWPORT;
 	send(fd, initiator, sizeof(metadataPacket_t), 0);
 	free(initiator);
 	return(0);
+}
+
+int launchDataFlowTcp(ParseResults_t config)
+{
+	//Prepare the socket
+	int sz = 1;
+	int fd;
+	struct sockaddr_in portname;
+	struct hostent *hp;
+
+	//Get the socket
+	fd = socket (PF_INET, SOCK_STREAM, 0);
+  setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, &sz, 4);
+  
+  //Configuration de la structure
+  hp = gethostbyname (config.address);
+  if (hp == NULL)
+  {
+  	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", config.address);
+    return (-1);
+  }
+  bzero (&portname, sizeof portname);
+  portname.sin_port = htons (config.serverFlowPort);
+  portname.sin_family = AF_INET;
+  memcpy(&portname.sin_addr.s_addr, hp->h_addr_list[0], sizeof(portname.sin_addr.s_addr));
+
+  //Tentative de connexion
+  if(connect (fd, (struct sockaddr *) &portname, sizeof portname) !=0)
+  {
+  	fprintf(stderr, "[ERROR] Unable to connect flow link to server %s:%d\n", config.address, config.serverFlowPort);
+  	return (-1);
+  }
+  return(fd);
 }
 
 int main (int argc, char* argv[])
@@ -291,14 +326,12 @@ int main (int argc, char* argv[])
 	if(launchMetadata(myParseResults)<0) exit(-1);
 
 	/*********** Launch the data flow ************************/
-	/*
 	if(myParseResults.protocol == USE_TCP)
 	{
 		if(launchDataFlowTcp(myParseResults)<0) exit(-1);
 	}else{
-		if(launchDataFlowUdp(myParseResults)<0) exit(-1);
+		//if(launchDataFlowUdp(myParseResults)<0) exit(-1);
 	}
-	*/
 
 
 return (0);

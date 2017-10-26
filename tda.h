@@ -6,8 +6,14 @@
 #define USE_UDP 1
 #define USE_TCP 2
 
-typedef struct metadataPacket{
+typedef struct configurationPacket
+{
 	int mode;
+	int serverFlowPort;
+	int clientFlowPort;
+} configurationPacket_t;
+
+typedef struct metadataPacket{
 	unsigned long lostOverLastPeriod;
 	unsigned long receivedOverLastPeriod;
 	unsigned long lastIndexReceived;

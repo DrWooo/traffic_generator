@@ -310,6 +310,7 @@ int launchDataFlowTcp(ParseResults_t config)
   	fprintf(stderr, "[ERROR] Unable to connect flow link to server %s:%d\n", config.address, config.serverFlowPort);
   	return (-1);
   }
+  //
   return(fd);
 }
 
@@ -323,7 +324,7 @@ int main (int argc, char* argv[])
 	printArguments(myParseResults);
 
 	/*********** Launch the data acquisition *****************/
-	if(launchMetadata(myParseResults)<0) exit(-1);
+	if(launchMetadata(myParseResults)<0) exit(-1); 
 
 	/*********** Launch the data flow ************************/
 	if(myParseResults.protocol == USE_TCP)

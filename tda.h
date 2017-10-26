@@ -22,5 +22,12 @@ typedef struct metadataPacket{
 typedef struct dataPacket{
 	unsigned long index;
 	int size;
+	char buffer[1500];
 } dataPacket_t;
+
+
+
+
+
+
 #endif

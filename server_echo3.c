@@ -190,6 +190,7 @@ int launchTcpTarget(int conDes)
 
 int main ()
 {
+	int ftd = 0;
 	/*************** Initialize global variables ***********************/
 	//Initialize mutex
 	pthread_mutex_init(&lock, NULL);
@@ -215,7 +216,8 @@ int main ()
 	/***************** Initialize flow link **************************/
 	//Create the socket according to the mode
 	fprintf(stdout, "Initializing target, mode : ");
-	int ftd = initiateTarget();
+	
+	ftd = initiateTarget();
 	//ftd is either a socket descriptor (UDP) or a connection descriptor (TCP)
 	if(ftd < 0)
 	{

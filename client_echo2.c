@@ -341,6 +341,8 @@ int main (int argc, char* argv[])
 		//if(launchDataFlowUdp(myParseResults)<0) exit(-1);
 	}
 
+	while(1);
+
 
 return (0);
 }

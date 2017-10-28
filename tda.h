@@ -5,6 +5,7 @@
 #define USE_UNDEFINED 0
 #define USE_UDP 1
 #define USE_TCP 2
+#define MESSAGE_DATASIZE 500
 
 typedef struct configurationPacket
 {
@@ -22,7 +23,7 @@ typedef struct metadataPacket{
 typedef struct dataPacket{
 	unsigned long index;
 	int size;
-	char buffer[1500];
+	char content[MESSAGE_DATASIZE];
 } dataPacket_t;
 
 

@@ -246,6 +246,7 @@ int connectToMetadataServer(ParseResults_t myParseResults)
   if (hp == NULL)
   {
   	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", myParseResults.address);
+  	perror("gethostbyname@connectToMetadataServer");
     return (-1);
   }
   bzero (&portname, sizeof portname);
@@ -256,7 +257,7 @@ int connectToMetadataServer(ParseResults_t myParseResults)
   //Tentative de connexion
   if(connect (fd, (struct sockaddr *) &portname, sizeof portname) !=0)
   {
-  	fprintf(stderr, "[ERROR] Unable to connect metadata link to server %s:%d\n", myParseResults.address, myParseResults.metadataPort);
+  	perror("connect@connectToMetadataServer");
   	return (-1);
   }
   return(fd);
@@ -297,6 +298,7 @@ int launchDataFlowTcp(ParseResults_t config)
   if (hp == NULL)
   {
   	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", config.address);
+  	perror("gethostbyname@launchDataFlowTcp");
     return (-1);
   }
   bzero (&portname, sizeof portname);
@@ -307,10 +309,15 @@ int launchDataFlowTcp(ParseResults_t config)
   //Tentative de connexion
   if(connect (fd, (struct sockaddr *) &portname, sizeof portname) !=0)
   {
-  	fprintf(stderr, "[ERROR] Unable to connect flow link to server %s:%d\n", config.address, config.serverFlowPort);
+  	perror("connect@launchDataFlowTcp");
   	return (-1);
   }
-  //
+  dataPacket_t test;
+  test.index = 12;
+  strcpy(test.content, "Salut");
+  test.size = 0;
+  fprintf(stdout, "Sent : %lu\n", send(fd, &test, sizeof(dataPacket_t), 0));
+
   return(fd);
 }
 

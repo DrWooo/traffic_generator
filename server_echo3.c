@@ -42,7 +42,7 @@ int launchMetaDataLink(int port)
 	sd = socket (PF_INET, SOCK_STREAM, 0);
   	if(sd < 0)
   	{
-  		fprintf(stderr, "[ERROR] Unable to get a socket\n");
+  		perror("socket@launchMetaDataLink");
   		return(-1);
   	}
   	//Set the socket
@@ -56,7 +56,7 @@ int launchMetaDataLink(int port)
   	//Bind
   	if (bind (sd, (struct sockaddr *) &portname, sizeof portname) != 0)
   	{
-  		fprintf(stderr, "[ERROR] Bind error.\n");
+  		perror("bind@launchMetaDataLink");
   		return (-1);
   	} 
   	//Listen for the client metadata link
@@ -67,7 +67,7 @@ int launchMetaDataLink(int port)
   	int cd = accept (sd, (struct sockaddr *) &(sharedConfig->from), &size);
   	if(cd < 0 )
   	{
-  		fprintf(stderr, "[ERROR] Connection error\n");
+  		perror("accept@launchMetaDataLink");
   		return(-1);
   	}
   	//Register socket for futher close
@@ -78,7 +78,7 @@ int launchMetaDataLink(int port)
   	//Read the initiator
   	if(recv(cd, receptionBuffer, sizeof(metadataPacket_t), 0) < 0)
   	{
-  		fprintf(stderr, "[ERROR] initiator packet reception error\n");
+  		perror("rcv@launchMetaDataLink");
   		return(-1);
   	}
   	initiator = (configurationPacket_t*) receptionBuffer;
@@ -107,7 +107,7 @@ int initiateTarget()
 	sd = socket (PF_INET, SOCK_STREAM, 0);
   	if(sd < 0)
   	{
-  		fprintf(stderr, "\n[ERROR] Unable to get a socket for the flow link\n");
+  		perror("socket@initiateTarget");
   		return(-1);
   	}
   	//Set the socket
@@ -121,7 +121,7 @@ int initiateTarget()
   	//Bind
   	if (bind (sd, (struct sockaddr *) &portname, sizeof portname) != 0)
 	{
-		fprintf(stderr, "\n[ERROR] Unable to bind the server port %d for flow link.\n", serverFlowPort);
+		perror("bind@initiateTarget");
 		return (-1);
 	}
 	//Save socket for futher close
@@ -138,7 +138,7 @@ int initiateTarget()
 	  	int cd = accept (sd, (struct sockaddr *) &(sharedConfig->from), &size);
 	  	if(cd < 0 )
 	  	{
-	  		fprintf(stderr, "[ERROR] Connection error for flow link (TCP)\n");
+	  		perror("accept@initiateTarget");
 	  		return(-1);
 	  	}
 	  	return(cd);
@@ -168,19 +168,28 @@ void printConfiguration()
 	fprintf(stdout, "------------------------------------\n\n");
 }
 
-void* tagetRoutine(void* sd)
+int launchTcpTarget(int conDes)
 {
-	int* ftd = (int*) sd;
-	if(ftd == NULL)
+	char buffer[BUFFERS_SIZE];
+	dataPacket_t* packet;
+	if(recv(conDes, buffer, sizeof(dataPacket_t), 0) < 0)
 	{
-		fprintf(stderr, "[ERROR] Socket descriptor cast error on target thread\n");
+		perror("recv@launchTcpTarget");
+		return(-1);
 	}
-	
+	packet = (dataPacket_t*) buffer;
+	if(packet == NULL)
+	{
+		fprintf(stderr, "[ERROR] Unable to cast the received message to the data packet type");
+		return(-1);
+	}
+	fprintf(stdout, "Packet %lu received\n", packet->index);
+	fprintf(stdout, "%s\n", packet->content);
+	return(0);
 }
 
 int main ()
 {
-	pthread_t targetThread;
 	/*************** Initialize global variables ***********************/
 	//Initialize mutex
 	pthread_mutex_init(&lock, NULL);
@@ -207,6 +216,7 @@ int main ()
 	//Create the socket according to the mode
 	fprintf(stdout, "Initializing target, mode : ");
 	int ftd = initiateTarget();
+	//ftd is either a socket descriptor (UDP) or a connection descriptor (TCP)
 	if(ftd < 0)
 	{
 		exit(-1);
@@ -216,10 +226,17 @@ int main ()
 
 	/*********************** Start target *****************************/
 	fprintf(stdout, "Starting target ... \n");
-	startTarget();
-
-	while(1);
-
+	int retcode = 0;
+	if(sharedConfig->mode == USE_TCP)
+	{
+		retcode = launchTcpTarget(ftd);
+	}else{
+		//retcode = launchUdpTarget(ftd);
+	}
+	if(retcode < 0)
+	{
+		fprintf(stderr, "[ERROR] Unable to start target\n");
+	}
 
 
 

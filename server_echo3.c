@@ -153,7 +153,7 @@ int initiateTarget()
 
 void printConfiguration()
 {
-	char mode[3];
+	char mode[5];
 	if(sharedConfig->mode == USE_TCP)
 	{
 		strcpy(mode, "TCP");

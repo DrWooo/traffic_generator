@@ -1,14 +1,24 @@
+/*!
+ * Client Echo 2
+ *
+ *
+ * NOTE : La fonction randomLetter est copiée du travail de Pierre Lemarquand
+ */
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/types.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <strings.h>
 #include <string.h>
 #include "tda.h"
+#include <pthread.h>
 
 #define DOMAIN PF_INET
 #define TYPE SOCK_STREAM
@@ -32,16 +42,15 @@
 #define DEFAULT_DATARATE 1000000
 #define DEFAULT_PACKETSIZE PACKETSIZE_MIN
 #define DEFAULT_METADATAPORT 12346
+ 
 
 
 #define HELP_MESSAGE "Traffic Generator. \n Client Programm. \n Use : ./client_echo2 [OPTIONS] \n Options : \n --file <filename> \t Use a file to generate the traffic sent \n --udp \t Use UDP protocol (Not applicable with -t)\n --tcp \t Use TCP protocol (Default)\n --addres \t Server address. Server address to test\n --help \t Print this help\n --pcktSize <size> \t Indicate the packet size in bytes, in range [64,1500]\n --dataRate <data_rate> \t Provide data rate in bits per seconds (only applicable for UDP mode)\n --metPort <port> \t Provide the port used to exchange metadata with the server"
 
-/**
- * \brief Structur used to retrieve the results of the parsing method
- */
-typedef struct ParseResults{
+typedef struct configuration{
 	char filename[MAXFILENAMESIZE];
 	int useFile;
+	FILE* fileDescriptor;
 	int protocol;
 	int serverFlowPort;
 	int clientFlowPort;
@@ -49,32 +58,61 @@ typedef struct ParseResults{
 	int packetSize;
 	int dataRate;
 	int metadataPort;
-} ParseResults_t;
+	pthread_t sendingThread;
+	int metadataLinkSocketDescriptor;
+	int flowLinkSocketDescriptor;
+} configuration_t;
+
+configuration_t* sharedConfig;
+pthread_mutex_t lock;
+
+
+/*! 
+ * \brief Returns random capital letter
+ * \return a letter
+ */
+char randomLetter() { 
+  char res;
+  res = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[random () % 26];
+  return res;
+}
+/*!
+ * \brief Initiates the global variables
+ * \return 0 on succes, non-zero value on failure
+ */
+int initializeGlobalVariables(void)
+{
+	pthread_mutex_init(&lock, NULL);
+	sharedConfig = (configuration_t*) malloc(sizeof(configuration_t));
+	if(sharedConfig == NULL)
+	{
+		fprintf(stderr, "[ERROR] Not enough memory to start client\n");
+		return (-1);
+	}
+	sharedConfig->useFile = 0;
+	sharedConfig->protocol = DEFAULT_PROTOCOL;
+	sharedConfig->serverFlowPort = DEFAULT_SERVERFLOWPORT;
+	sharedConfig->clientFlowPort = DEFAULT_CLIENTFLOWPORT;
+	sharedConfig->packetSize = DEFAULT_PACKETSIZE;
+	sharedConfig->dataRate = DEFAULT_DATARATE;
+	sharedConfig->metadataPort = DEFAULT_METADATAPORT;
+	strcpy(sharedConfig->address, DEFAULT_ADDRESS);
+	return 0;
+}
 
 /**
  * \brief Parse Arguments
+ * Stores the results in sharedConfig (unprotected)
  * \param[in] argc, the arguments counter
  * \param[in] argv, the arguments values
- * \param[out] results, the results of the parse operation. Shall be allocated by user code.
  * \return 0 on sucess, 
  * 1 to exit programm normally
  * -1 if option is not recognized, 
  * -2 if option is missing, 
  * -3 if incorrect range of a parameter
  */
-int parseArguments(int argc, char* argv[], ParseResults_t* results)
+int parseArguments(int argc, char* argv[])
 {	
-	//By default : 
-	results->useFile = 0;
-	results->protocol = DEFAULT_PROTOCOL;
-	results->serverFlowPort = DEFAULT_SERVERFLOWPORT;
-	results->clientFlowPort = DEFAULT_CLIENTFLOWPORT;
-	results->packetSize = DEFAULT_PACKETSIZE;
-	results->dataRate = DEFAULT_DATARATE;
-	results->metadataPort = DEFAULT_METADATAPORT;
-	strcpy(results->address, DEFAULT_ADDRESS);
-
-
 	//For each argument except the first one (programm name)
 	for(int i = 1; i < argc; i++)
 	{
@@ -89,8 +127,8 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return (-2);
 			}
-			strcpy(results->filename, argv[i+1]);
-			results->useFile = 1;
+			strcpy(sharedConfig->filename, argv[i+1]);
+			sharedConfig->useFile = 1;
 			//Jump to next arg  because i+1 is the filename
 			i++;
 			valid = 1;
@@ -98,12 +136,12 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 		/********** Check for UDP/TCP option ****************/
 		if(strcmp(UDP_OPTION, argv[i]) == 0)
 		{
-			results->protocol = USE_UDP;
+			sharedConfig->protocol = USE_UDP;
 			valid = 1;
 		}
 		if(strcmp(TCP_OPTION, argv[i]) == 0)
 		{
-			results->protocol = USE_TCP;
+			sharedConfig->protocol = USE_TCP;
 			valid = 1;
 		}
 		/*********** Check for port option *****************/
@@ -116,7 +154,7 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return (-2);
 			}
-			results->serverFlowPort = atoi(argv[i+1]);
+			sharedConfig->serverFlowPort = atoi(argv[i+1]);
 			valid = 1;
 			//Jump to next argument as i+1 is the port number
 			i++;
@@ -131,7 +169,7 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return (-2);
 			}
-			results->metadataPort = atoi(argv[i+1]);
+			sharedConfig->metadataPort = atoi(argv[i+1]);
 			valid = 1;
 			//Jump to next argument as i+1 is the port number
 			i++;
@@ -147,7 +185,7 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return (-2);
 			}
-			strcpy(results->address, argv[i+1]);
+			strcpy(sharedConfig->address, argv[i+1]);
 			valid = 1;
 			i++;
 		}
@@ -157,11 +195,11 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 			//Check if a next argument is provided
 			if((i + 1) >= argc)
 			{
-				fprintf(stderr, "[ERROR] Please provide a valid address after : \"%s\"\n", ADDRESS_OPTION);
+				fprintf(stderr, "[ERROR] Please provide a valid datarate after : \"%s\"\n", DATARATE_OPTION);
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return (-2);
 			}
-			results->dataRate = atoi(argv[i+1]);
+			sharedConfig->dataRate = atoi(argv[i+1]);
 			i++;
 			valid = 1;
 		}
@@ -181,7 +219,7 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 				fprintf(stderr, "Type \"--help\" for help\n");
 				return(-3);
 			}
-			results->packetSize = packetSize;
+			sharedConfig->packetSize = packetSize;
 			valid = 1;
 			i++;
 		}
@@ -204,84 +242,201 @@ int parseArguments(int argc, char* argv[], ParseResults_t* results)
 
 /**
  * \brief Print passed parameters
- * \param[in]
+ * Reads from sharedConfig (unprotected)
  */
-void printArguments(ParseResults_t myParseResults)
+void printArguments(void)
 {
 	char mode[4];
-	if(myParseResults.protocol == USE_UDP)
+	if(sharedConfig->protocol == USE_UDP)
 	{
 		strcpy(mode,"UDP");
 	}else{
 		strcpy(mode,"TCP");
 	}
 	fprintf(stdout, "Mode : %s\n", mode);
-	fprintf(stdout, "Packet size : %dB\n", myParseResults.packetSize);
-	if(myParseResults.protocol == USE_UDP)
+	fprintf(stdout, "Packet size : %dB\n", sharedConfig->packetSize);
+	if(sharedConfig->protocol == USE_UDP)
 	{
-		fprintf(stdout, "Emission datarate : %dbps\n", myParseResults.dataRate);
+		fprintf(stdout, "Emission datarate : %dbps\n", sharedConfig->dataRate);
 	}
-	fprintf(stdout, "Address : %s\n", myParseResults.address);
-	fprintf(stdout, "Port tested : %d\n", myParseResults.serverFlowPort);
-	fprintf(stdout, "Metadata port : %d\n", myParseResults.metadataPort);
-	if(myParseResults.useFile)
+	fprintf(stdout, "Address : %s\n", sharedConfig->address);
+	fprintf(stdout, "Port tested : %d\n", sharedConfig->serverFlowPort);
+	fprintf(stdout, "Metadata port : %d\n", sharedConfig->metadataPort);
+	if(sharedConfig->useFile)
 	{
-		fprintf(stdout, "Use file : %s\n", myParseResults.filename);
+		fprintf(stdout, "Use file : %s\n", sharedConfig->filename);
 	}
 }
 
-int connectToMetadataServer(ParseResults_t myParseResults)
+/*!
+ * \brief Open a tcp link with the server to exchange metadata
+ * Reads from and Writes in sharedConfig (unprotected)
+ * \return 0 on succes, non-zero value on failure
+ */
+int connectToMetadataServer()
 {
 	int sz = 1;
-	int fd;
+	int sd;
 	struct sockaddr_in portname;
 	struct hostent *hp;
 
 	//Obtention de la socket
-	fd = socket (PF_INET, SOCK_STREAM, 0);
-  setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, &sz, 4);
-  
+	sd = socket (PF_INET, SOCK_STREAM, 0);
+  if(sd < 0)
+  {
+  	perror("socket@initiateTarget");
+  	return(-1);
+  }
+  setsockopt (sd, SOL_SOCKET, SO_REUSEADDR, &sz, 4);
+  sharedConfig->metadataLinkSocketDescriptor = sd;
+
   //Configuration de la structure
-  hp = gethostbyname (myParseResults.address);
+  hp = gethostbyname (sharedConfig->address);
   if (hp == NULL)
   {
-  	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", myParseResults.address);
+  	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", sharedConfig->address);
   	perror("gethostbyname@connectToMetadataServer");
     return (-1);
   }
   bzero (&portname, sizeof portname);
-  portname.sin_port = htons (myParseResults.metadataPort);
+  portname.sin_port = htons (sharedConfig->metadataPort);
   portname.sin_family = AF_INET;
   memcpy(&portname.sin_addr.s_addr, hp->h_addr_list[0], sizeof(portname.sin_addr.s_addr));
 
   //Tentative de connexion
-  if(connect (fd, (struct sockaddr *) &portname, sizeof portname) !=0)
+  if(connect(sd, (struct sockaddr *) &portname, sizeof portname) !=0)
   {
   	perror("connect@connectToMetadataServer");
   	return (-1);
   }
-  return(fd);
+  return(0);
 }
 
-int launchMetadata(ParseResults_t myParseResults)
+/*!
+ * \brief Initiates the link with the server and tranfers to it
+ * usefull information about the test about to start
+ * Reads from sharedConfig (unprotected)
+ * \return 0 on succes, non-zero value on failure
+ */
+int launchMetadata()
 {
-	int fd = connectToMetadataServer(myParseResults);
-	if(fd < 0) return(-1);
+	if(connectToMetadataServer()<0) return (-1);
 	configurationPacket_t* initiator = (configurationPacket_t*) malloc(sizeof(configurationPacket_t));
 	if(initiator == NULL)
 	{
 		fprintf(stderr, "Unable to allocate memory for the initiator packet\n");
 		return(-1);
 	}
-	initiator->mode = myParseResults.protocol;
+	initiator->mode = sharedConfig->protocol;
 	initiator->serverFlowPort = DEFAULT_SERVERFLOWPORT;
 	initiator->clientFlowPort = DEFAULT_CLIENTFLOWPORT;
-	send(fd, initiator, sizeof(metadataPacket_t), 0);
+	send(sharedConfig->metadataLinkSocketDescriptor, initiator, sizeof(metadataPacket_t), 0);
 	free(initiator);
 	return(0);
 }
 
-int launchDataFlowTcp(ParseResults_t config)
+/*!
+ * \brief Fill the memory from buffer to buffer + size - 2
+ * with readeable characters, depending on the mode specified by sharedConfig->useFile
+ * Fill  buffer + size - 1 with \0
+ * Reads from sharedConfig (protected)
+ * \param buffer : the pointer to the first char
+ * \param size : number of char to create/read from file
+ * \return 0 on succes, -1 on failure, 1 when nothing more is to be read out of the file (if applicable).
+ */
+int getContent(char* buffer, int size)
+{
+	int fromFile;
+	FILE* tempFile;
+	pthread_mutex_lock(&lock);
+	fromFile = sharedConfig->useFile;
+	tempFile = sharedConfig->fileDescriptor;
+	pthread_mutex_unlock(&lock);
+	if(fromFile)
+	{
+		int temp;
+		if((temp = fgetc(tempFile)) == EOF) return 1;
+		*buffer = (char) temp;
+		for(char* index = buffer + 1; index < (buffer + size - 1); index ++)
+		{
+			temp = fgetc(tempFile);
+			if(temp == EOF)
+			{
+				*index = '\0';
+				return 0;
+			}else{
+				*index = (char) temp;
+			}
+		}
+		*(buffer + size - 1) = '\0';
+	}else{ 
+		for(char* index = buffer; index < (buffer + size - 1); index++)
+		{
+			*index = randomLetter();
+		}
+		*(buffer + size - 1) = '\0';
+	} 
+	return 0;
+}
+
+/*!
+ * \briefs Routine to be used in a different thread that generates tcp flow
+ * Reads data from sharedConfig (protected)
+ * \param noArgs : unused
+ * \return NULL
+ */
+void* sendTcpRoutine(void* noArgs)
+{
+	pthread_mutex_lock(&lock);
+	int fd = sharedConfig->flowLinkSocketDescriptor;
+	int size = sharedConfig->packetSize;
+	pthread_mutex_unlock(&lock);
+
+	//Get a packet
+	dataPacket_t* packet;
+	packet = (dataPacket_t*) malloc(sizeof(dataPacket_t));
+	if(packet == NULL)
+	{
+		fprintf(stderr, "[ERROR] Unable to get memory for flow packet (tcp send routine)\n");
+	}
+	//First index
+	packet->index = 0;
+	//Set the size
+	packet->size = size;
+	//Allocate place for the content
+	packet->content = (char*) malloc(size -sizeof(dataPacket_t) - TCPIP_HEADERSIZE);
+	//To store the number of bytes sent
+	int sent = 0;
+	//Buffer that stores all the content of what is to be sent
+	char buffer[BUFFERS_SIZE];
+	while(1)
+  	{
+  		packet->index++;
+  		//Get the content
+  		if(getContent(packet->content, size - sizeof(dataPacket_t) - TCPIP_HEADERSIZE) != 0) break;
+  		//Preparing to send trough a buffer (char)
+  		//First, copy the packet at the beginning of the buffer
+  		memcpy(buffer, packet, sizeof(dataPacket_t));
+  		//Then, copy the content
+  		memcpy(buffer + sizeof(dataPacket_t), packet->content, packet->size - sizeof(dataPacket_t) - TCPIP_HEADERSIZE);
+  		sent = send(fd, buffer, size - TCPIP_HEADERSIZE, 0);
+
+  		//Print for debug
+  		//fprintf(stdout, "Sent : %d. Expected : %lu, Index: %lu, Content : %s\n",sent, packet->size - TCPIP_HEADERSIZE, packet->index, packet->content);
+  	}
+  	free(packet->content);
+  	free(packet);
+  	return NULL;
+}
+
+
+/*!
+ * \brief Starts the tcp data flow
+ * This function performs a call to pthread_create to create the routinr used to
+ * generate the traffic.
+ * Reads and write from and to sharedConfig (unprotected) before the pthread_create call
+ */
+int launchDataFlowTcp(void)
 {
 	//Prepare the socket
 	int sz = 1;
@@ -291,18 +446,36 @@ int launchDataFlowTcp(ParseResults_t config)
 
 	//Get the socket
 	fd = socket (PF_INET, SOCK_STREAM, 0);
-  setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, &sz, 4);
-  
-  //Configuration de la structure
-  hp = gethostbyname (config.address);
+	if(fd < 0)
+  {
+  	perror("socket@launchMetaDataLink");
+  	return(-1);
+  }
+	int result;
+  result = setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, &sz, 4);
+  if(result < 0)
+  {
+  	fprintf(stderr, "[ERROR] Error while setting options for socket\n");
+  }
+ 	//Disable naggling to keep packets aligned
+ 	int flag = 1;
+  result = setsockopt(fd, IPPROTO_TCP,TCP_NODELAY, (char*) &flag, sizeof(int));
+  if(result < 0)
+  {
+  	fprintf(stderr, "[ERROR] Error while setting options for socket\n");
+  }
+  //Store the socket identifier
+  sharedConfig->flowLinkSocketDescriptor = fd;
+  //Configuration de la structure pour connexion
+  hp = gethostbyname (sharedConfig->address);
   if (hp == NULL)
   {
-  	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", config.address);
+  	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", sharedConfig->address);
   	perror("gethostbyname@launchDataFlowTcp");
     return (-1);
   }
   bzero (&portname, sizeof portname);
-  portname.sin_port = htons (config.serverFlowPort);
+  portname.sin_port = htons (sharedConfig->serverFlowPort);
   portname.sin_family = AF_INET;
   memcpy(&portname.sin_addr.s_addr, hp->h_addr_list[0], sizeof(portname.sin_addr.s_addr));
 
@@ -312,37 +485,73 @@ int launchDataFlowTcp(ParseResults_t config)
   	perror("connect@launchDataFlowTcp");
   	return (-1);
   }
-  dataPacket_t test;
-  test.index = 12;
-  strcpy(test.content, "Salut");
-  test.size = 0;
-  fprintf(stdout, "Sent : %lu\n", send(fd, &test, sizeof(dataPacket_t), 0));
 
-  return(fd);
+  pthread_mutex_lock(&lock);
+  if(pthread_create(&(sharedConfig->sendingThread), NULL, sendTcpRoutine, NULL) !=0){
+  	fprintf(stderr, "[ERROR] Unable to start the sending thread\n");
+  	pthread_mutex_unlock(&lock);
+  	return (-1);
+  }
+  pthread_mutex_unlock(&lock);
+  return 0;
+
+
 }
+
+/*!
+ * \briefs Open the file an store its descriptor on sharedConfig
+ * \return 0 on succes, non-zero value on error
+ */
+int openFile(void)
+{
+	sharedConfig->fileDescriptor = fopen(sharedConfig->filename, "r");
+	if(sharedConfig->fileDescriptor == NULL)
+	{
+		perror("fopen@openFile");
+		return (-1);
+	}
+	return (0);
+}
+
 
 int main (int argc, char* argv[])
 {
+	/************* Initialize global variables ****************/
+	if(initializeGlobalVariables() < 0) exit(-1);
 	/************ Retrieve and print arguments ****************/
-	ParseResults_t myParseResults;
-	int retcode = parseArguments(argc, argv, &myParseResults);
+	int retcode = parseArguments(argc, argv);
 	if(retcode < 0)	exit(-1);
 	if(retcode > 0) exit(0);
-	printArguments(myParseResults);
+	printArguments();
+	if(sharedConfig->useFile)
+	{
+		if(openFile() < 0) exit(-1);;
+	}
 
-	/*********** Launch the data acquisition *****************/
-	if(launchMetadata(myParseResults)<0) exit(-1); 
+	/*********** Launch the metadata link *****************/
+	if(launchMetadata()<0) exit(-1); 
 
 	/*********** Launch the data flow ************************/
-	if(myParseResults.protocol == USE_TCP)
+	if(sharedConfig->protocol == USE_TCP)
 	{
-		if(launchDataFlowTcp(myParseResults)<0) exit(-1);
+		if(launchDataFlowTcp()<0) exit(-1);
 	}else{
 		//if(launchDataFlowUdp(myParseResults)<0) exit(-1);
 	}
 
-	while(1);
+	pthread_t toJoin;
+	pthread_mutex_lock(&lock);
+	toJoin = sharedConfig->sendingThread;
+	pthread_mutex_unlock(&lock);
 
+	pthread_join(toJoin, NULL);
 
-return (0);
+	pthread_mutex_lock(&lock);
+	if(sharedConfig->useFile)
+	{
+		fclose(sharedConfig->fileDescriptor);
+	}
+	pthread_mutex_unlock(&lock);
+	free(sharedConfig);
+	return (0);
 }

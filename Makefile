@@ -1,8 +1,14 @@
 CC = clang -pthread
 CFLAGS = -Wall -g
 CLIBS =
+DEBUGOPTION =
+
+debug: DEBUGOPTION = -D LOG_DEBUG_LEVEL
+debug: all
+	echo ${DEBUGOPTION}
 
 all: clean libisocket.o client_echo.o client_echo2.o server_echo2.o server_echo3.o server_echo.o 
+	echo ${DEBUGOPTION}
 	${CC} client_echo.o libisocket.o ${CLIBS} -o client_echo
 	${CC} client_echo2.o libisocket.o ${CLIBS} -o client_echo2
 	${CC} server_echo.o libisocket.o ${CLIBS} -o server_echo 
@@ -16,7 +22,7 @@ client_echo.o: client_echo.c
 	${CC} ${CFLAGS} -c client_echo.c -o client_echo.o
 
 client_echo2.o: client_echo2.c
-	${CC} ${CFLAGS} -c client_echo2.c -o client_echo2.o
+	${CC} ${DEBUGOPTION} ${CFLAGS} -c client_echo2.c -o client_echo2.o
 
 server_echo.o: server_echo.c
 	${CC} ${CFLAGS} -c server_echo.c -o server_echo.o
@@ -25,7 +31,7 @@ server_echo2.o: server_echo2.c
 	${CC} ${CFLAGS} -c server_echo2.c -o server_echo2.o
 
 server_echo3.o: server_echo3.c
-	${CC} ${CFLAGS} -c server_echo3.c -o server_echo3.o
+	${CC} ${DEBUGOPTION} ${CFLAGS} -c server_echo3.c -o server_echo3.o
 
 clean:
 	rm -f *.o client_echo client_echo2 server_echo server_echo2 server_echo3 libisocket.o

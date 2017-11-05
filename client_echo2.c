@@ -59,6 +59,7 @@ typedef struct configuration{
 	int dataRate;
 	int metadataPort;
 	pthread_t sendingThread;
+	pthread_t dataPrinterThread;
 	int metadataLinkSocketDescriptor;
 	int flowLinkSocketDescriptor;
 } configuration_t;
@@ -398,6 +399,8 @@ void* sendTcpRoutine(void* noArgs)
 	if(packet == NULL)
 	{
 		fprintf(stderr, "[ERROR] Unable to get memory for flow packet (tcp send routine)\n");
+		pthread_exit(NULL);
+		return NULL;
 	}
 	//First index
 	packet->index = 0;
@@ -426,6 +429,7 @@ void* sendTcpRoutine(void* noArgs)
   	}
   	free(packet->content);
   	free(packet);
+  	pthread_exit(NULL);
   	return NULL;
 }
 
@@ -499,6 +503,130 @@ int launchDataFlowTcp(void)
 }
 
 /*!
+ * \brief Waits the specified time
+ * \param [in] microsec: time to wait in microsec
+ */
+void waitUs (int microsec)
+{
+  struct timeval tv;
+  tv.tv_sec = microsec / 1000000;
+  tv.tv_usec = (microsec - (tv.tv_sec * 1000000));       
+  select (0, NULL, NULL, NULL, &tv);
+}
+
+void* waitRoutine(void* value)
+{
+	int* toWait = (int*) value;
+	waitUs(*toWait);
+	pthread_exit(NULL);
+	return NULL;
+}
+
+
+void* sendUdpRoutine(void* noArgs)
+{
+	struct sockaddr_in to;
+	struct hostent *hp;
+	int toWaitUs;
+	pthread_t waitThread;
+	int size;
+	int sd;
+	pthread_mutex_lock(&lock);
+	size = sharedConfig->packetSize;
+	sd = sharedConfig->flowLinkSocketDescriptor;
+  hp = gethostbyname (sharedConfig->address);
+  if (hp == NULL)
+  {
+  	fprintf(stderr, "[ERROR] Unable to translate address : %s\n", sharedConfig->address);
+  	perror("gethostbyname@sendUdpRoutine");
+  	pthread_mutex_unlock(&lock);
+  	pthread_exit(NULL);
+    return NULL;
+  }
+  bzero (&to, sizeof to);
+  to.sin_port = htons (sharedConfig->serverFlowPort);
+  to.sin_family = AF_INET;
+  memcpy(&to.sin_addr.s_addr, hp->h_addr_list[0], sizeof(to.sin_addr.s_addr));
+  toWaitUs = 1000000*8*sharedConfig->packetSize / (sharedConfig->dataRate) ;
+  pthread_mutex_unlock(&lock);
+
+  //Get a buffer
+  char buffer[BUFFERS_SIZE];
+	dataPacket_t* packet;
+	packet = (dataPacket_t*) buffer;
+	if(packet == NULL)
+	{
+		fprintf(stderr, "[ERROR] Cast error (tcp send routine)\n");
+		pthread_exit(NULL);
+		return NULL;
+	}
+	//First index
+	packet->index = 0;
+	//Set the size
+	packet->size = size;
+	//Link
+	packet->content = buffer + sizeof(dataPacket_t);
+	//To store the number of bytes sent
+	int sent = 0;
+	while(1)
+	{
+		//Start timer
+		if(pthread_create(&waitThread, NULL, waitRoutine, &toWaitUs) !=0) break;
+		packet->index++;
+		//Get the content, place if after packet
+		if(getContent(packet->content, size - sizeof(dataPacket_t) - UDPIP_HEADERSIZE) != 0) break;
+		//Preparing to send trough a buffer (char).
+		//NOTE : Here, everything is performed inside buffer[], so no copy is necessary (speeding up the routine).
+		sent = sendto(sd, buffer, size - UDPIP_HEADERSIZE, 0, (struct sockaddr *) &to, sizeof to);
+		if(sent < 0)
+		{
+			perror("sendto@sendUdpRoutine");
+			pthread_exit(NULL);
+			return NULL;
+		}
+		//Print for debug
+		TRACE_LOG("Sent : %d. Expected : %lu, Index: %lu, Content : %s\n",sent, packet->size - UDPIP_HEADERSIZE, packet->index, packet->content);
+		pthread_join(waitThread, NULL);
+	}
+	free(packet->content);
+	free(packet);
+	pthread_exit(NULL);
+	return NULL;
+
+}
+
+
+int launchDataFlowUdp(void)
+{
+	//Prepare the socket
+	int sz = 1;
+	int fd;
+
+	//Get the socket
+	fd = socket (PF_INET, SOCK_DGRAM, 0);
+	if(fd < 0)
+  {
+  	perror("socket@launchMetaDataLink");
+  	return(-1);
+  }
+	int result;
+  result = setsockopt (fd, SOL_SOCKET, SO_REUSEADDR, &sz, 4);
+  if(result < 0)
+  {
+  	fprintf(stderr, "[ERROR] Error while setting options for socket\n");
+  }
+  pthread_mutex_lock(&lock);
+  sharedConfig->flowLinkSocketDescriptor = fd;
+  if(pthread_create(&(sharedConfig->sendingThread), NULL, sendUdpRoutine, NULL) !=0){
+  	fprintf(stderr, "[ERROR] Unable to start the sending thread\n");
+  	pthread_mutex_unlock(&lock);
+  	return (-1);
+  }
+  pthread_mutex_unlock(&lock);
+  return 0;
+}
+
+/*!
  * \briefs Open the file an store its descriptor on sharedConfig
  * \return 0 on succes, non-zero value on error
  */
@@ -512,6 +640,55 @@ int openFile(void)
 	}
 	return (0);
 }
+
+void* dataPrinterRoutine(void* noArgs)
+{
+	char buffer[BUFFERS_SIZE];
+	metadataPacket_t* stats;
+	int received;
+	int sd;
+	int pktSize;
+	unsigned long lastIndex;
+	double dataRatembps;
+	double relativeLost;
+	pthread_mutex_lock(&lock);
+	sd = sharedConfig->metadataLinkSocketDescriptor;
+	pktSize = sharedConfig->packetSize;
+	pthread_mutex_unlock(&lock);
+	while(1)
+	{
+		received = recv(sd, buffer, sizeof(metadataPacket_t), 0);
+		if(received < 0)
+		{
+			perror("recv@dataPrinterRoutine");
+			return NULL;
+		}
+		stats = (metadataPacket_t*) buffer;
+		if(stats == NULL)
+		{
+			fprintf(stderr, "[ERROR] Cast error on data printer routine\n");
+			return NULL;
+		}
+		dataRatembps = ((double) stats->receivedOverLastPeriod) * pktSize * 8 / (COMMON_PERIOD_MS * 1000);
+		relativeLost = ((double) stats->lostOverLastPeriod) / (stats->lastIndexReceived - lastIndex);
+		lastIndex = stats->lastIndexReceived;
+		fprintf(stdout, "Débit : %.2f Mb/s. Perte : %.2f %% \n",dataRatembps, relativeLost*100);
+	}
+}
+
+int launchDataPrinter(void)
+{
+	pthread_mutex_lock(&lock);
+  if(pthread_create(&(sharedConfig->dataPrinterThread), NULL, dataPrinterRoutine, NULL) !=0){
+  	fprintf(stderr, "[ERROR] Unable to start the sending thread\n");
+  	pthread_mutex_unlock(&lock);
+  	return (-1);
+  }
+  pthread_mutex_unlock(&lock);
+  return 0;
+}
+
+
 
 
 int main (int argc, char* argv[])
@@ -536,8 +713,10 @@ int main (int argc, char* argv[])
 	{
 		if(launchDataFlowTcp()<0) exit(-1);
 	}else{
-		//if(launchDataFlowUdp(myParseResults)<0) exit(-1);
+		if(launchDataFlowUdp()<0) exit(-1);
 	}
+	/************ Launch the data printer ********************/
+	if(launchDataPrinter() < 0) exit(-1);
 
 	pthread_t toJoin;
 	pthread_mutex_lock(&lock);

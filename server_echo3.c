@@ -36,10 +36,15 @@ typedef struct metrics
 	unsigned long lastReceivedIndex;
 } metrics_t;
 
+//Both following can only be called by receiveFlow.
+//Their presence prevent the use of the mutex
+int glbReceiveDescriptor;
+struct sockaddr* glbFrom;
 
 metrics_t* sharedMetrics;
 configuration_t* sharedConfig;
-pthread_mutex_t lock;
+pthread_mutex_t lockConfig;
+pthread_mutex_t lockStats;
 
 /*!
  * \brief Opens a TCP socket used to exchange metadata with the emitter
@@ -203,20 +208,29 @@ void printConfiguration()
  * Reads the configuration from sharedConfig (protected)
  * \param[out] buffer, the buffer where to store the bytes
  * \param[in] number of bytes to read
- * \return the number of bytes read (when positive or equal to 0) or an error code (when negative) 
+ * \param[in] substractHeader, set to 1 to substract the header to the given size
+ * \return the size read
  */
-int receiveFlow(char* buffer, size_t size)
+int receiveFlow(char* buffer, size_t size, int substractHeader)
 {
 	int retval = -1;
-	pthread_mutex_lock(&lock);
 	if(sharedConfig->mode == USE_TCP)
 	{
-		retval = recv(sharedConfig->flowLinkTcpConnectionDescriptor, buffer, size, 0);
+		if(substractHeader)
+		{
+			retval = recv(glbReceiveDescriptor, buffer, size - sizeof(dataPacket_t) - TCPIP_HEADERSIZE, 0);
+		}else{
+			retval = recv(glbReceiveDescriptor, buffer, size, 0);
+		}
 	}else{
 		socklen_t addrSize = sizeof(sharedConfig->from);
-		retval = recvfrom(sharedConfig->flowLinkSocketDescriptor, buffer, size, 0, (struct sockaddr *) &(sharedConfig->from), &addrSize);
+		if(substractHeader)
+		{
+			retval = recvfrom(glbReceiveDescriptor, buffer, size - sizeof(dataPacket_t) - UDPIP_HEADERSIZE, 0, glbFrom, &addrSize);
+		}else{
+			retval = recvfrom(glbReceiveDescriptor, buffer, size, 0, glbFrom, &addrSize);
+		}
 	}
-	pthread_mutex_unlock(&lock);
 	return retval;
 }
 /*!
@@ -225,10 +239,13 @@ int receiveFlow(char* buffer, size_t size)
  * Stops when no more is to be received (recv or recvfrom returns 0)
  * Reads configuration from sharedConfig (protected)
  * Sets the metrics in sharedMetrics (protected)
+ * NOTE : Initially, this function was supposed to work both with udp and tcp mode
+ * but we had to seperate it because the behaviour of recvfrom is NOT the same as recv
+ * Indeed, after research it appears that you can't read part of datagrams when using them.
  * \param [in] noArgs : unused
  * \return always NULL
  */
-void* targetRoutine(void* noArgs)
+void* targetRoutineTcp(void* noArgs)
 {
 	char buffer[BUFFERS_SIZE]; //Buffer to store reception on one cycle
 	dataPacket_t* packet; //The data packet structure, pointing into buffer, no dynamic allocation
@@ -238,10 +255,10 @@ void* targetRoutine(void* noArgs)
 	{
 		int receivedFirst, receivedSecond; //Bytes received
 		//Step 1 : Receive the bytes needed for the dataPacket_t structure...
-		receivedFirst = receiveFlow(buffer, sizeof(dataPacket_t));
+		receivedFirst = receiveFlow(buffer, sizeof(dataPacket_t),0);
 		if(receivedFirst < 0)
 		{
-			perror("receiveFlow@launchTcpTarget");
+			perror("receiveFlow@targetRoutine");
 			pthread_exit(NULL);
 			return NULL;
 		}
@@ -258,15 +275,15 @@ void* targetRoutine(void* noArgs)
 			return NULL;
 		}
 		//Step 3 : Retrieve the content and store it next to the data packet, on the buffer
-		receivedSecond = receiveFlow(buffer + sizeof(dataPacket_t), packet->size - sizeof(dataPacket_t) - TCPIP_HEADERSIZE);
+		receivedSecond = receiveFlow(buffer + sizeof(dataPacket_t), packet->size,1);
 		//Step 4 : Link packet->content to be the right next byte
 		packet->content = buffer + sizeof(dataPacket_t);
 
 		//Print for debug 
-		TRACE_LOG("Received : %d. Expected : %lu, Index: %lu, Content : %s\n", receivedFirst + receivedSecond, packet->size - TCPIP_HEADERSIZE, packet->index, packet->content);
+		TRACE_LOG("Received : %d. Expected : %lu, Index: %lu, Content : %s\n", receivedFirst + receivedSecond, packet->size - (sharedConfig->mode == USE_TCP ? TCPIP_HEADERSIZE : UDPIP_HEADERSIZE), packet->index, packet->content);
 		
 		//Now, it's time for metrics ...
-		pthread_mutex_lock(&lock);
+		pthread_mutex_lock(&lockStats);
 		sharedMetrics->receivedOverLastPeriod++;
 		if(packet->index < sharedMetrics->lastReceivedIndex)
 		{
@@ -281,11 +298,78 @@ void* targetRoutine(void* noArgs)
 			//Update last received index
 			sharedMetrics->lastReceivedIndex = packet->index;
 		}
-		pthread_mutex_unlock(&lock);
+		pthread_mutex_unlock(&lockStats);
 	} //Loop
 	pthread_exit(NULL);
 	return NULL;
 }
+
+/*!
+ * \brief Routine to be executed in a separate thread as a target of the flow.
+ * Receives the packet, identifies their composiion and generates metrics.
+ * Stops when no more is to be received (recv or recvfrom returns 0)
+ * Reads configuration from sharedConfig (protected)
+ * Sets the metrics in sharedMetrics (protected)
+ * NOTE : Initially, this function was supposed to work both with udp and tcp mode
+ * but we had to seperate it because the behaviour of recvfrom is NOT the same as recv
+ * Indeed, after research it appears that you can't read part of datagrams when using them.
+ * \param [in] noArgs : unused
+ * \return always NULL
+ */
+void* targetRoutineUdp(void* noArgs)
+{
+	char buffer[BUFFERS_SIZE]; //Buffer to store reception on one cycle
+	dataPacket_t* packet; //The data packet structure, pointing into buffer, no dynamic allocation
+	int continueLoop = 1; //Boolean to continue reception
+
+	while(continueLoop)
+	{
+		int received;
+		//Step 1 : Receive ALL the datagram
+		received = receiveFlow(buffer, BUFFERS_SIZE,0);
+		//Note : on datagram mode, it's ok to provide a size bigger than what will actually be read
+		if(received< 0)
+		{
+			perror("receiveFlow@targetRoutine");
+			pthread_exit(NULL);
+			return NULL;
+		}
+		//Step 2 : Retrieve the packet (starting at buffer[0], ie buffer)
+		packet = (dataPacket_t*) buffer;
+		if(packet == NULL)
+		{
+			fprintf(stderr, "[ERROR] Unable to cast the received message to the data packet type");
+			pthread_exit(NULL);
+			return NULL;
+		}
+		//Step 3 : Link the content
+		packet->content = buffer + sizeof(dataPacket_t);
+
+		//Print for debug 
+		TRACE_LOG("Received : %d. Expected : %lu, Index: %lu, Content : %s\n", received, packet->size - (sharedConfig->mode == USE_TCP ? TCPIP_HEADERSIZE : UDPIP_HEADERSIZE), packet->index, packet->content);
+		
+		//Now, it's time for metrics ...
+		pthread_mutex_lock(&lockStats);
+		sharedMetrics->receivedOverLastPeriod++;
+		if(packet->index < sharedMetrics->lastReceivedIndex)
+		{
+			//Late packet, was considered lost but it's not, decrement if able
+			if(sharedMetrics->lostOverLastPeriod > 0) sharedMetrics->lostOverLastPeriod--;
+		}else{
+			if(packet->index > (sharedMetrics->lastReceivedIndex + 1))
+			{
+				//Packet of index sharedMetrics->lasReceivedIndex + 1 is missing ...
+				sharedMetrics->lostOverLastPeriod++;
+			}
+			//Update last received index
+			sharedMetrics->lastReceivedIndex = packet->index;
+		}
+		pthread_mutex_unlock(&lockStats);
+	} //Loop
+	pthread_exit(NULL);
+	return NULL;
+}
+
 
 
 /*!
@@ -294,14 +378,27 @@ void* targetRoutine(void* noArgs)
  */
 int launchTarget(void)
 {
-	pthread_mutex_lock(&lock);
-	if(pthread_create(&sharedConfig->targetThreadId, NULL, targetRoutine, NULL)!=0)
+	pthread_mutex_lock(&lockConfig);
+	if(sharedConfig->mode == USE_TCP)
 	{
-		pthread_mutex_unlock(&lock);
-		fprintf(stderr, "[ERROR] Unable to start target\n");
-		return (-1);
+		glbReceiveDescriptor = sharedConfig->flowLinkTcpConnectionDescriptor;
+		if(pthread_create(&sharedConfig->targetThreadId, NULL, targetRoutineTcp, NULL)!=0)
+		{
+			pthread_mutex_unlock(&lockConfig);
+			fprintf(stderr, "[ERROR] Unable to start target\n");
+			return (-1);
+		}
+	}else{
+		glbReceiveDescriptor = sharedConfig->flowLinkSocketDescriptor;
+		glbFrom = (struct sockaddr *) &(sharedConfig->from);
+		if(pthread_create(&sharedConfig->targetThreadId, NULL, targetRoutineUdp, NULL)!=0)
+		{
+			pthread_mutex_unlock(&lockConfig);
+			fprintf(stderr, "[ERROR] Unable to start target\n");
+			return (-1);
+		}
 	}
-	pthread_mutex_unlock(&lock);
+	pthread_mutex_unlock(&lockConfig);
 	return 0;
 }
 /*!
@@ -318,7 +415,8 @@ void closeSockets(void)
 int initializeGlobalVariables(void)
 {
 	//Initialize mutex
-	pthread_mutex_init(&lock, NULL);
+	pthread_mutex_init(&lockConfig, NULL);
+	pthread_mutex_init(&lockStats, NULL);
 	//Construct sharedMetrics
 	sharedMetrics = (metrics_t*) malloc(sizeof(metrics_t));
 	//Construct sharedConfig
@@ -352,7 +450,7 @@ void waitMs (int millisec)
 {
   struct timeval tv;
   tv.tv_sec = millisec % 1000;
-  tv.tv_usec = (millisec - (millisec % 1000)) * 1000;       
+  tv.tv_usec = (millisec - (tv.tv_sec * 1000)) * 1000;       
   select (0, NULL, NULL, NULL, &tv);
 }
 
@@ -360,18 +458,18 @@ void* metadataEmitterRoutine(void* noArgs)
 {
 	metadataPacket_t stats;
 	int fd;
-	pthread_mutex_lock(&lock);
+	pthread_mutex_lock(&lockConfig);
 	fd = sharedConfig->metadataLinkTcpConnexionDescriptor;
-	pthread_mutex_unlock(&lock);
+	pthread_mutex_unlock(&lockConfig);
 	while(1)
 	{
-		pthread_mutex_lock(&lock);
+		pthread_mutex_lock(&lockStats);
 		stats.lostOverLastPeriod = sharedMetrics->lostOverLastPeriod;
 		stats.receivedOverLastPeriod = sharedMetrics->receivedOverLastPeriod;
 		stats.lastIndexReceived = sharedMetrics->lastReceivedIndex;
 		sharedMetrics->lostOverLastPeriod = 0;
 		sharedMetrics->receivedOverLastPeriod = 0;
-		pthread_mutex_unlock(&lock);
+		pthread_mutex_unlock(&lockStats);
 		send(fd, &stats, sizeof(metadataPacket_t), 0);
 
 		//Print for debug
@@ -384,14 +482,14 @@ void* metadataEmitterRoutine(void* noArgs)
 
 int launchMetadataEmitter(void)
 {
-	pthread_mutex_lock(&lock);
+	pthread_mutex_lock(&lockConfig);
 	if(pthread_create(&sharedConfig->metadataEmitterId, NULL, metadataEmitterRoutine, NULL)!=0)
 	{
-		pthread_mutex_unlock(&lock);
+		pthread_mutex_unlock(&lockConfig);
 		fprintf(stderr, "[ERROR] Unable to start metadata emitter\n");
 		return (-1);
 	}
-	pthread_mutex_unlock(&lock);
+	pthread_mutex_unlock(&lockConfig);
 	return 0;
 }
 

@@ -9,7 +9,7 @@
 #define USE_TCP 2
 #define MESSAGE_DATASIZE 500
 #define TCPIP_HEADERSIZE 40
-#define UDPIP_HEADERSIZE
+#define UDPIP_HEADERSIZE 28
 #define BUFFERS_SIZE 1500
 #ifdef LOG_DEBUG_LEVEL
 #define TRACE_LOG(fmt, args...) fprintf(stdout, fmt, ##args);

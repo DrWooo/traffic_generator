@@ -36,11 +36,6 @@ typedef struct metrics
 	unsigned long lastReceivedIndex;
 } metrics_t;
 
-//Both following can only be called by receiveFlow.
-//Their presence prevent the use of the mutex
-int glbReceiveDescriptor;
-struct sockaddr* glbFrom;
-
 metrics_t* sharedMetrics;
 configuration_t* sharedConfig;
 pthread_mutex_t lockConfig;
@@ -203,36 +198,7 @@ void printConfiguration()
 	fprintf(stdout, "------------------------------------\n\n");
 }
 
-/*!
- * \brief Receives some bytes on the flow port, either for UDP or TCP connection
- * Reads the configuration from sharedConfig (protected)
- * \param[out] buffer, the buffer where to store the bytes
- * \param[in] number of bytes to read
- * \param[in] substractHeader, set to 1 to substract the header to the given size
- * \return the size read
- */
-int receiveFlow(char* buffer, size_t size, int substractHeader)
-{
-	int retval = -1;
-	if(sharedConfig->mode == USE_TCP)
-	{
-		if(substractHeader)
-		{
-			retval = recv(glbReceiveDescriptor, buffer, size - sizeof(dataPacket_t) - TCPIP_HEADERSIZE, 0);
-		}else{
-			retval = recv(glbReceiveDescriptor, buffer, size, 0);
-		}
-	}else{
-		socklen_t addrSize = sizeof(sharedConfig->from);
-		if(substractHeader)
-		{
-			retval = recvfrom(glbReceiveDescriptor, buffer, size - sizeof(dataPacket_t) - UDPIP_HEADERSIZE, 0, glbFrom, &addrSize);
-		}else{
-			retval = recvfrom(glbReceiveDescriptor, buffer, size, 0, glbFrom, &addrSize);
-		}
-	}
-	return retval;
-}
+
 /*!
  * \brief Routine to be executed in a separate thread as a target of the flow.
  * Receives the packet, identifies their composiion and generates metrics.
@@ -250,15 +216,20 @@ void* targetRoutineTcp(void* noArgs)
 	char buffer[BUFFERS_SIZE]; //Buffer to store reception on one cycle
 	dataPacket_t* packet; //The data packet structure, pointing into buffer, no dynamic allocation
 	int continueLoop = 1; //Boolean to continue reception
+	int sd;
+
+	pthread_mutex_lock(&lockConfig);
+	sd = sharedConfig->flowLinkTcpConnectionDescriptor;
+	pthread_mutex_unlock(&lockConfig);
 
 	while(continueLoop)
 	{
 		int receivedFirst, receivedSecond; //Bytes received
 		//Step 1 : Receive the bytes needed for the dataPacket_t structure...
-		receivedFirst = receiveFlow(buffer, sizeof(dataPacket_t),0);
+		receivedFirst = recv(sd, buffer, sizeof(dataPacket_t), 0);
 		if(receivedFirst < 0)
 		{
-			perror("receiveFlow@targetRoutine");
+			perror("recv@targetRoutine");
 			pthread_exit(NULL);
 			return NULL;
 		}
@@ -275,7 +246,7 @@ void* targetRoutineTcp(void* noArgs)
 			return NULL;
 		}
 		//Step 3 : Retrieve the content and store it next to the data packet, on the buffer
-		receivedSecond = receiveFlow(buffer + sizeof(dataPacket_t), packet->size,1);
+		receivedSecond = recv(sd, buffer + sizeof(dataPacket_t), packet->size - sizeof(dataPacket_t) - TCPIP_HEADERSIZE,0);
 		//Step 4 : Link packet->content to be the right next byte
 		packet->content = buffer + sizeof(dataPacket_t);
 
@@ -321,16 +292,21 @@ void* targetRoutineUdp(void* noArgs)
 	char buffer[BUFFERS_SIZE]; //Buffer to store reception on one cycle
 	dataPacket_t* packet; //The data packet structure, pointing into buffer, no dynamic allocation
 	int continueLoop = 1; //Boolean to continue reception
+	int sd;
+	socklen_t addrSize = sizeof(sharedConfig->from);
+	pthread_mutex_lock(&lockConfig);
+	sd = sharedConfig->flowLinkSocketDescriptor;
+	pthread_mutex_unlock(&lockConfig);
 
 	while(continueLoop)
 	{
 		int received;
 		//Step 1 : Receive ALL the datagram
-		received = receiveFlow(buffer, BUFFERS_SIZE,0);
+		received = recvfrom(sd, buffer, BUFFERS_SIZE, 0, (struct sockaddr*) (&sharedConfig->from), &addrSize);
 		//Note : on datagram mode, it's ok to provide a size bigger than what will actually be read
 		if(received< 0)
 		{
-			perror("receiveFlow@targetRoutine");
+			perror("recvfrom@targetRoutine");
 			pthread_exit(NULL);
 			return NULL;
 		}
@@ -381,7 +357,6 @@ int launchTarget(void)
 	pthread_mutex_lock(&lockConfig);
 	if(sharedConfig->mode == USE_TCP)
 	{
-		glbReceiveDescriptor = sharedConfig->flowLinkTcpConnectionDescriptor;
 		if(pthread_create(&sharedConfig->targetThreadId, NULL, targetRoutineTcp, NULL)!=0)
 		{
 			pthread_mutex_unlock(&lockConfig);
@@ -389,8 +364,6 @@ int launchTarget(void)
 			return (-1);
 		}
 	}else{
-		glbReceiveDescriptor = sharedConfig->flowLinkSocketDescriptor;
-		glbFrom = (struct sockaddr *) &(sharedConfig->from);
 		if(pthread_create(&sharedConfig->targetThreadId, NULL, targetRoutineUdp, NULL)!=0)
 		{
 			pthread_mutex_unlock(&lockConfig);

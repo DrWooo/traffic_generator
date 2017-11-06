@@ -425,7 +425,7 @@ void* sendTcpRoutine(void* noArgs)
   		sent = send(fd, buffer, size - TCPIP_HEADERSIZE, 0);
 
   		//Print for debug
-  		//fprintf(stdout, "Sent : %d. Expected : %lu, Index: %lu, Content : %s\n",sent, packet->size - TCPIP_HEADERSIZE, packet->index, packet->content);
+  		TRACE_LOG("Sent : %d. Expected : %lu, Index: %lu, Content : %s\n",sent, packet->size - TCPIP_HEADERSIZE, packet->index, packet->content);
   	}
   	free(packet->content);
   	free(packet);
@@ -547,7 +547,7 @@ void* sendUdpRoutine(void* noArgs)
   to.sin_port = htons (sharedConfig->serverFlowPort);
   to.sin_family = AF_INET;
   memcpy(&to.sin_addr.s_addr, hp->h_addr_list[0], sizeof(to.sin_addr.s_addr));
-  toWaitUs = 1000000*8*sharedConfig->packetSize / (sharedConfig->dataRate) ;
+  toWaitUs = 1000000 * 8 * sharedConfig->packetSize / (sharedConfig->dataRate) ;
   pthread_mutex_unlock(&lock);
 
   //Get a buffer
@@ -707,6 +707,8 @@ int main (int argc, char* argv[])
 
 	/*********** Launch the metadata link *****************/
 	if(launchMetadata()<0) exit(-1); 
+	//Wait some time for the server to open the socket
+	waitUs(100000);
 
 	/*********** Launch the data flow ************************/
 	if(sharedConfig->protocol == USE_TCP)
